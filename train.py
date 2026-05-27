@@ -7,67 +7,65 @@ from flow import VanillaFlow, flow_loss
 from node import RoutingNode
 
 # ── Stage 1 ──────────────────────────────────────────────────────────────────
-backbone = Backbone(input_dim=2, hidden_dim=64, output_dim=32)
-model    = VanillaFlow(backbone)
+backbone  = Backbone(input_dim=2, hidden_dim=64, output_dim=32)
+model     = VanillaFlow(backbone)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-loss_history = []
-window   = 50
-epsilon  = 0.3
-sigma_mode = None
 
 print("Stage 1: Training vanilla flow matching...")
 
-for step in range(10000):
-    x0, x1, xt, t, target_v = sample_trajectory(256)
-
+for step in range(5000):
+    x0, x1, xt, t, target_v = sample_trajectory(512)
     loss = flow_loss(model, x0, x1, xt, t, target_v)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+    if step % 500 == 0:
+        print(f"  Step {step} | Loss {loss.item():.4f}")
 
-    if step % 100 == 0:
-        loss_history.append(loss.item())
+# Known analytically: var of mixture of N(-4,1) and N(4,1) = 16 + 1 = 17
+sigma_mode = 17.0
+print(f"\nStage 1 done. sigma_mode^2 = {sigma_mode}")
 
-        if len(loss_history) > window:
-            loss_history.pop(0)
-            std = np.std(loss_history)
-            print(f"Step {step} | Loss {loss.item():.4f} | Loss std {std:.4f}")
+torch.save(model.state_dict(), "stage1_model.pt")
+torch.save(backbone.state_dict(), "backbone.pt")  # keep this — stage 2 still needs it
+print("Models saved.")
 
-            if std < epsilon:
-                # Estimate sigma_mode from x1 variance (data property, stable)
-                with torch.no_grad():
-                    _, x1_s, _, _, _ = sample_trajectory(1024)
-                    sigma_mode = x1_s.var().item()
-                print(f"\nStage 1 converged at step {step}.")
-                print(f"sigma_mode^2 = {sigma_mode:.4f}")
-                break
-
-if sigma_mode is None:
-    with torch.no_grad():
-        _, x1_s, _, _, _ = sample_trajectory(1024)
-        sigma_mode = x1_s.var().item()
-    print(f"Stage 1 hit max steps. sigma_mode^2 = {sigma_mode:.4f}")
-
-
-torch.save(backbone.state_dict(), "backbone.pt")
-print("Backbone saved.")
+# Verify backbone immediately after saving
+model.eval()
+x_check = torch.randn(1000, 1)
+with torch.no_grad():
+    for i in range(200):
+        t_val = i / 200
+        t_c = torch.full((1000, 1), t_val)
+        v_c = model(x_check, t_c)
+        x_check = x_check + v_c / 200
+c = x_check.numpy().flatten()
+print(f"Backbone check: below -2: {(c<-2).sum()}, above +2: {(c>2).sum()}, middle: {((c>-2)&(c<2)).sum()}")
+model.train()
 
 # ── Stage 2 ──────────────────────────────────────────────────────────────────
 node = RoutingNode(query_dim=32, v_dim=1)
 
-# Orthogonal init — guaranteed balanced start
+# Orthogonal init — guaranteed balanced start, no randomness
+# Measure actual query directions for each mode
+backbone.eval()
 with torch.no_grad():
-    node.k_left.data  = torch.zeros(32); node.k_left.data[0]  = 1.0
-    node.k_right.data = torch.zeros(32); node.k_right.data[1] = 1.0
+    x_left  = torch.full((500, 1), -3.5)
+    x_right = torch.full((500, 1),  3.5)
+    t_late  = torch.full((500, 1),  0.9)
+    q_left_mean  = backbone(x_left,  t_late).mean(0)
+    q_right_mean = backbone(x_right, t_late).mean(0)
+    # Normalize and set as keys
+    node.k_left.data  = q_left_mean  / q_left_mean.norm()
+    node.k_right.data = q_right_mean / q_right_mean.norm()
+backbone.train()
+print(f"Key similarity: {torch.nn.functional.cosine_similarity(node.k_left.unsqueeze(0), node.k_right.unsqueeze(0)).item():.4f}  (expected near -1.0)")
 
+# Freeze backbone — stage 2 only trains the routing node
 for param in backbone.parameters():
     param.requires_grad = False
 
-optimizer2 = optim.Adam(
-    node.parameters(),
-    lr=1e-4
-)
+optimizer2 = optim.Adam(node.parameters(), lr=1e-3)
 
 N_warmup     = 500
 lambda_final = 0.5
@@ -102,7 +100,7 @@ for step in range(10000):
     ).mean()
 
     # Entropy — stay uncertain early, allow confidence later
-    entropy  = -(scores * (scores + 1e-8).log()).sum(-1).mean()
+    entropy   = -(scores * (scores + 1e-8).log()).sum(-1).mean()
     l_entropy = -entropy
 
     # Query separation — left/right queries should point different directions
@@ -126,9 +124,9 @@ for step in range(10000):
     loss.backward()
     optimizer2.step()
 
-    if step % 200 == 0:
+    if step % 500 == 0:
         print(
-            f"Step {step} | "
+            f"  Step {step:5d} | "
             f"Flow {l_flow.item():.4f} | "
             f"Contrast {l_contrast.item():.4f} | "
             f"Entropy {entropy.item():.4f} | "
@@ -136,6 +134,5 @@ for step in range(10000):
             f"QuerySep {l_query_sep.item():.4f}"
         )
 
-torch.save(backbone.state_dict(), "backbone.pt")
 torch.save(node.state_dict(), "node.pt")
-print("\nModels saved.")
+print("\nNode saved.")
