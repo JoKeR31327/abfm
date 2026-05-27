@@ -5,8 +5,8 @@ import torch.nn.functional as F
 class RoutingNode(nn.Module):
     def __init__(self, query_dim=32, v_dim=1):
         super().__init__()
-        self.register_buffer('k_left',  torch.randn(query_dim))
-        self.register_buffer('k_right', torch.randn(query_dim))
+        self.k_left  = nn.Parameter(torch.randn(query_dim))
+        self.k_right = nn.Parameter(torch.randn(query_dim))
         self.proj_left  = nn.Linear(query_dim, v_dim)
         self.proj_right = nn.Linear(query_dim, v_dim)
 

@@ -34,3 +34,25 @@ print(f"k_right norm: {node.k_right.norm():.4f}")
 
 print(f"k_left  direction sim to q_left:  {torch.nn.functional.cosine_similarity(node.k_left.unsqueeze(0), q_left.mean(0, keepdim=True)).item():.4f}")
 print(f"k_right direction sim to q_right: {torch.nn.functional.cosine_similarity(node.k_right.unsqueeze(0), q_right.mean(0, keepdim=True)).item():.4f}")
+
+
+
+# in debug.py
+x_left  = torch.full((100, 1), -3.5)
+x_right = torch.full((100, 1),  3.5)
+t_late  = torch.full((100, 1),  0.9)
+
+with torch.no_grad():
+    q_left  = backbone(x_left,  t_late)
+    q_right = backbone(x_right, t_late)
+    _, _, v_left_out,  _ = node(q_left)
+    _,  _, _, v_right_out = node(q_right)
+    print(f"v_left  for left  sample: {v_left_out.mean():.4f}")
+    print(f"v_right for right sample: {v_right_out.mean():.4f}")
+
+
+from data import sample_trajectory
+_, x1, _, _, target_v = sample_trajectory(1000)
+left_mask = (x1 < 0).squeeze()
+print(f"Mean target_v for left samples: {target_v[left_mask].mean():.4f}")
+print(f"Mean target_v for right samples: {target_v[~left_mask].mean():.4f}")

@@ -4,10 +4,10 @@ from backbone import Backbone
 from flow import VanillaFlow
 from node import RoutingNode
 
+
+
 # Load models
 backbone = Backbone(input_dim=2, hidden_dim=64, output_dim=32)
-backbone.load_state_dict(torch.load("backbone.pt", weights_only=True))
-backbone.eval()
 
 model = VanillaFlow(backbone)
 model.load_state_dict(torch.load("stage1_model.pt", weights_only=True))
@@ -50,3 +50,41 @@ with torch.no_grad():
         backbone(x_right, t_late).mean(0, keepdim=True)
     )
 print(f"Query similarity at t=0.9: {sim.item():.4f}")
+
+
+# Per-sample score trajectory check
+torch.manual_seed(42)
+
+# Pick one sample heading left, one heading right
+x_left_sample  = torch.tensor([[-3.5]])
+x_right_sample = torch.tensor([[3.5]])
+
+steps = 200
+scores_left_traj  = []
+scores_right_traj = []
+
+xt_left  = x_left_sample.clone()
+xt_right = x_right_sample.clone()
+
+with torch.no_grad():
+    for i in range(steps):
+        t_val = i / steps
+        t = torch.full((1, 1), t_val)
+
+        q_l = backbone(xt_left,  t)
+        q_r = backbone(xt_right, t)
+
+        _, scores_l, _, _ = node(q_l)
+        _, scores_r, _, _ = node(q_r)
+
+        scores_left_traj.append(scores_l[0, 0].item())   # left branch score for left sample
+        scores_right_traj.append(scores_r[0, 1].item())  # right branch score for right sample
+
+        xt_left  = xt_left  + node(q_l)[0] / steps
+        xt_right = xt_right + node(q_r)[0] / steps
+
+print(f"\nPer-sample score trajectories:")
+print(f"Left  sample — score_left:  t=0: {scores_left_traj[0]:.4f}  t=0.5: {scores_left_traj[100]:.4f}  t=1.0: {scores_left_traj[199]:.4f}")
+print(f"Right sample — score_right: t=0: {scores_right_traj[0]:.4f}  t=0.5: {scores_right_traj[100]:.4f}  t=1.0: {scores_right_traj[199]:.4f}")
+
+

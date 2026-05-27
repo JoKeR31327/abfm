@@ -1,6 +1,6 @@
 import torch
 import torch.optim as optim
-import numpy as np
+import torch.nn.functional as F
 from data import sample_trajectory
 from backbone import Backbone
 from flow import VanillaFlow, flow_loss
@@ -22,9 +22,7 @@ for step in range(5000):
     if step % 500 == 0:
         print(f"  Step {step} | Loss {loss.item():.4f}")
 
-# Known analytically: var of mixture of N(-4,1) and N(4,1) = 16 + 1 = 17
-sigma_mode = 17.0
-print(f"\nStage 1 done. sigma_mode^2 = {sigma_mode}")
+print("\nStage 1 done. sigma_mode^2 = 17.0")
 
 torch.save(model.state_dict(), "stage1_model.pt")
 torch.save(backbone.state_dict(), "backbone.pt")  # keep this — stage 2 still needs it
@@ -69,27 +67,24 @@ optimizer2 = optim.Adam(node.parameters(), lr=1e-3)
 
 N_warmup     = 500
 lambda_final = 0.5
-gamma_final  = 0.1
 
 print("\nStage 2: Training routing node...")
 
 for step in range(10000):
     warmup = min(1.0, step / N_warmup)
     lam    = lambda_final * warmup
-    gam    = gamma_final  * warmup
 
     x0, x1, xt, t, target_v = sample_trajectory(256)
 
     q = backbone(xt, t)
-    pred_v, scores, v_left, v_right = node(q)
+    _, scores, v_left, v_right = node(q)
 
-    # Branch assignment by target sign
-    left_mask  = (x1 < 0).squeeze()
-    right_mask = (x1 > 0).squeeze()
-
-    l_flow_left  = ((v_left[left_mask]   - target_v[left_mask])  ** 2).mean() if left_mask.sum()  > 0 else torch.tensor(0.0)
-    l_flow_right = ((v_right[right_mask] - target_v[right_mask]) ** 2).mean() if right_mask.sum() > 0 else torch.tensor(0.0)
-    l_flow = (l_flow_left + l_flow_right) / 2
+    # Unsupervised routed flow loss: blend experts by the soft routing scores
+    # and compute MSE against the target velocity. This removes explicit
+    # supervision on routing (no CE, no masked branch losses).
+    routing = scores  # shape [B, 2]
+    v_routed = routing[:, 0:1] * v_left + routing[:, 1:2] * v_right
+    l_flow = ((v_routed - target_v) ** 2).mean()
 
     # Contrastive — push branch vector fields apart
     w_left  = node.proj_left.weight
@@ -99,26 +94,7 @@ for step in range(10000):
         w_right.flatten().unsqueeze(0)
     ).mean()
 
-    # Entropy — stay uncertain early, allow confidence later
-    entropy   = -(scores * (scores + 1e-8).log()).sum(-1).mean()
-    l_entropy = -entropy
-
-    # Query separation — left/right queries should point different directions
-    if left_mask.sum() > 0 and right_mask.sum() > 0:
-        q_left_mean  = q[left_mask].mean(0)
-        q_right_mean = q[right_mask].mean(0)
-        l_query_sep  = -torch.nn.functional.cosine_similarity(
-            q_left_mean.unsqueeze(0),
-            q_right_mean.unsqueeze(0)
-        ).mean()
-    else:
-        l_query_sep = torch.tensor(0.0)
-
-    # Balance — prevent one branch dominating
-    mean_scores = scores.mean(0)
-    l_balance   = ((mean_scores - 0.5) ** 2).sum()
-
-    loss = l_flow + lam * l_contrast + gam * l_entropy + 1.0 * l_balance + 0.5 * l_query_sep
+    loss = l_flow + lam * l_contrast
 
     optimizer2.zero_grad()
     loss.backward()
@@ -128,10 +104,7 @@ for step in range(10000):
         print(
             f"  Step {step:5d} | "
             f"Flow {l_flow.item():.4f} | "
-            f"Contrast {l_contrast.item():.4f} | "
-            f"Entropy {entropy.item():.4f} | "
-            f"Balance {l_balance.item():.4f} | "
-            f"QuerySep {l_query_sep.item():.4f}"
+            f"Contrast {l_contrast.item():.4f}"
         )
 
 torch.save(node.state_dict(), "node.pt")
